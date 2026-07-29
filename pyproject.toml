@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whist"
+version = "0.1.0"
+description = "Contract Whist card game engine and CLI"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+whist-play = "whist.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
