@@ -12,7 +12,7 @@ from __future__ import annotations
 import random
 
 from .cards import Card, Rank, Suit
-from .player import BiddingState, Player, TrickState
+from .player import BiddingState, Player, TrickState, legal_bids
 
 
 class RandomBot(Player):
@@ -26,8 +26,7 @@ class RandomBot(Player):
         return self._rng.choice(list(Suit))
 
     def choose_bid(self, state: BiddingState) -> int:
-        options = [b for b in range(0, state.hand_size + 1) if b != state.forbidden_bid]
-        return self._rng.choice(options)
+        return self._rng.choice(legal_bids(state))
 
     def choose_card(self, state: TrickState) -> Card:
         return self._rng.choice(state.valid_cards)
@@ -68,15 +67,9 @@ class SimpleBot(Player):
                     estimate += 0.3
 
         bid = max(0, min(state.hand_size, round(estimate)))
-        if state.forbidden_bid is not None and bid == state.forbidden_bid:
-            if bid == state.hand_size:
-                bid -= 1
-            elif bid == 0:
-                bid += 1
-            elif estimate - bid < 0:
-                bid -= 1
-            else:
-                bid += 1
+        options = legal_bids(state)
+        if bid not in options:
+            bid = min(options, key=lambda b: abs(b - estimate))
         return bid
 
     def choose_card(self, state: TrickState) -> Card:

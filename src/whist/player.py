@@ -21,6 +21,20 @@ class BiddingState:
     bids_so_far: list[tuple[str, int]]  # (player_name, bid) in bidding order
     is_dealer: bool
     forbidden_bid: int | None  # bid the dealer may not make (screw-the-dealer), else None
+    zero_bid_forbidden: bool = False  # True if this player may not bid 0 (three-in-a-row rule)
+
+
+def legal_bids(state: BiddingState) -> list[int]:
+    """Bids from 0..hand_size that don't violate forbidden_bid or the
+    three-zero-bids-in-a-row rule."""
+    bids = []
+    for bid in range(0, state.hand_size + 1):
+        if state.forbidden_bid is not None and bid == state.forbidden_bid:
+            continue
+        if state.zero_bid_forbidden and bid == 0:
+            continue
+        bids.append(bid)
+    return bids
 
 
 @dataclass
@@ -48,6 +62,7 @@ class Player(ABC):
         self.bid: int | None = None
         self.tricks_won: int = 0
         self.total_score: int = 0
+        self.consecutive_zero_bids: int = 0
 
     @abstractmethod
     def choose_trump(self, hand: list[Card]) -> Suit:
@@ -85,8 +100,13 @@ class HumanPlayer(Player):
             print(f"Bids so far: {bid_summary}")
         while True:
             prompt = f"Enter your bid (0-{state.hand_size})"
+            notes = []
             if state.forbidden_bid is not None:
-                prompt += f", may not be {state.forbidden_bid}"
+                notes.append(f"may not be {state.forbidden_bid}")
+            if state.zero_bid_forbidden:
+                notes.append("may not be 0 (you've bid 0 twice in a row)")
+            if notes:
+                prompt += f" [{'; '.join(notes)}]"
             prompt += ": "
             raw = input(prompt).strip()
             try:
@@ -99,6 +119,9 @@ class HumanPlayer(Player):
                 continue
             if state.forbidden_bid is not None and bid == state.forbidden_bid:
                 print(f"As dealer you cannot bid {state.forbidden_bid} (total would equal tricks available).")
+                continue
+            if state.zero_bid_forbidden and bid == 0:
+                print("You cannot bid 0 three times in a row.")
                 continue
             return bid
 

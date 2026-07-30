@@ -12,6 +12,9 @@ scoring, no partnerships).
   the dealer's left, dealer bidding last. The dealer may not make the bid
   that would force total bids to equal the tricks available ("screw the
   dealer" — someone must always be wrong).
+- A player may not bid 0 three rounds in a row, except when they are the
+  dealer in the 1-card round and forbidden (by the rule above) from
+  bidding 1 — in that case 0 is their only legal bid.
 - Standard follow-suit trick taking: trump beats non-trump, otherwise
   highest card of the suit led wins.
 - Scoring: exact bid scores `10 + tricks taken`; missing the bid still

@@ -78,6 +78,47 @@ def test_dealer_sees_correct_forbidden_bid_and_may_avoid_it():
     assert result.bids["P1"] == 0
 
 
+def test_cannot_bid_zero_three_times_in_a_row():
+    p1 = ScriptedPlayer("P1", bids=[0, 0, 0])
+    p2 = ScriptedPlayer("P2", bids=[1, 1, 1])
+    p3 = ScriptedPlayer("P3", bids=[1, 1, 1])
+    game = WhistGame([p1, p2, p3], rng=random.Random(0))
+
+    game.dealer_index = 1  # keep P2 as dealer throughout so P1 is never restricted by that rule
+    game.play_round(3)
+    assert p1.consecutive_zero_bids == 1
+
+    game.dealer_index = 1
+    game.play_round(3)
+    assert p1.consecutive_zero_bids == 2
+
+    game.dealer_index = 1
+    with pytest.raises(ValueError, match="third round in a row"):
+        game.play_round(3)
+
+
+def test_dealer_may_bid_zero_third_time_when_forced_in_one_card_round():
+    # P1 bids 0 in two prior rounds (streak=2), then is dealer in a 1-card
+    # round where the others' bids force forbidden_bid=1 -- 0 is P1's only
+    # legal bid, so the three-in-a-row rule must not block it.
+    p1 = ScriptedPlayer("P1", bids=[0, 0, 0])
+    p2 = ScriptedPlayer("P2", bids=[1, 1, 0])
+    p3 = ScriptedPlayer("P3", bids=[1, 1, 0])
+    game = WhistGame([p1, p2, p3], rng=random.Random(0))
+
+    game.dealer_index = 1  # P2 dealer for the first two (unrelated) rounds
+    game.play_round(3)
+    game.dealer_index = 1
+    game.play_round(3)
+    assert p1.consecutive_zero_bids == 2
+
+    game.dealer_index = 0  # P1 is dealer for the 1-card round
+    result = game.play_round(1)
+
+    assert result.bids["P1"] == 0
+    assert p1.consecutive_zero_bids == 3
+
+
 def test_scoring_matches_bid_exactness():
     players = [SimpleBot(f"Bot{i}", rng=random.Random(i)) for i in range(4)]
     game = WhistGame(players, rng=random.Random(7))

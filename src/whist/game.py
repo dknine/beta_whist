@@ -9,6 +9,9 @@ Rules implemented:
   left of the dealer, dealer bidding last. The dealer may not bid the value
   that would make total bids equal the number of tricks available
   ("screw the dealer" / "hook" rule) -- someone must always be wrong.
+- A player may not bid 0 three rounds in a row, except when they are the
+  dealer in the 1-card round and forbidden (by the rule above) from
+  bidding 1 -- in that situation 0 is their only legal bid.
 - Standard follow-suit trick taking; trump beats non-trump; highest card of
   the led suit wins if no trump is played.
 - Scoring: a player who takes exactly their bid scores 10 + tricks taken;
@@ -121,6 +124,12 @@ class WhistGame:
                 if 0 <= candidate <= hand_size:
                     forbidden = candidate
 
+            # A player may not bid 0 three rounds in a row, except when they are
+            # the dealer in the 1-card round and forbidden (screw-the-dealer) from
+            # bidding 1 -- then 0 is their only legal bid.
+            dealer_forced_to_zero = is_dealer and hand_size == 1 and forbidden == 1
+            zero_bid_forbidden = player.consecutive_zero_bids >= 2 and not dealer_forced_to_zero
+
             state = BiddingState(
                 hand=list(player.hand),
                 hand_size=hand_size,
@@ -131,6 +140,7 @@ class WhistGame:
                 bids_so_far=list(bids_so_far),
                 is_dealer=is_dealer,
                 forbidden_bid=forbidden,
+                zero_bid_forbidden=zero_bid_forbidden,
             )
             bid = player.choose_bid(state)
             if not (0 <= bid <= hand_size):
@@ -140,7 +150,12 @@ class WhistGame:
                     f"{player.name} (dealer) made a forbidden bid of {bid} "
                     f"(would make total bids equal {hand_size})"
                 )
+            if zero_bid_forbidden and bid == 0:
+                raise ValueError(
+                    f"{player.name} bid 0 for the third round in a row, which is not allowed"
+                )
             player.bid = bid
+            player.consecutive_zero_bids = player.consecutive_zero_bids + 1 if bid == 0 else 0
             bids_so_far.append((player.name, bid))
             self._notify(f"{player.name} bids {bid}")
 
