@@ -14,7 +14,8 @@ scoring, no partnerships).
   dealer" — someone must always be wrong).
 - Standard follow-suit trick taking: trump beats non-trump, otherwise
   highest card of the suit led wins.
-- Scoring: exact bid scores `10 + tricks taken`; missing the bid scores `0`.
+- Scoring: exact bid scores `10 + tricks taken`; missing the bid still
+  scores the tricks taken, just without the bonus.
 
 ## Project layout
 

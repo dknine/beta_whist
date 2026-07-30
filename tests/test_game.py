@@ -86,7 +86,7 @@ def test_scoring_matches_bid_exactness():
     assert sum(result.tricks_won.values()) == 5  # every trick has exactly one winner
     for name in result.bids:
         made_it = result.bids[name] == result.tricks_won[name]
-        expected = (10 + result.tricks_won[name]) if made_it else 0
+        expected = result.tricks_won[name] + (10 if made_it else 0)
         assert result.scores[name] == expected
 
     for player in players:

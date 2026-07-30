@@ -12,7 +12,8 @@ Rules implemented:
 - Standard follow-suit trick taking; trump beats non-trump; highest card of
   the led suit wins if no trump is played.
 - Scoring: a player who takes exactly their bid scores 10 + tricks taken;
-  a player who misses their bid scores 0 for the round.
+  a player who misses their bid still scores the number of tricks taken
+  (just without the bonus).
 """
 
 from __future__ import annotations
@@ -199,7 +200,7 @@ class WhistGame:
             bids[player.name] = player.bid
             tricks[player.name] = player.tricks_won
             made_it = player.bid == player.tricks_won
-            points = (10 + player.tricks_won) if made_it else 0
+            points = player.tricks_won + (10 if made_it else 0)
             scores[player.name] = points
             player.total_score += points
         return RoundResult(
