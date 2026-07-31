@@ -88,14 +88,28 @@ python -m pip install --user -e .[rl]
   the loss; in `training=False` mode it either samples (for use as a training
   opponent) or plays greedily via `deterministic=True` (for evaluation).
 - **Training algorithm** (`rl/train.py`): self-play REINFORCE with a
-  per-hand-size running baseline. Each *round* is treated as an independent
-  episode — a fresh deal that doesn't affect any other round — so every
-  decision a player makes in a round (the bid, and each card played) shares
-  that round's score as its return. Most seats each game are played by the
-  live policy (so gradients from every seat's experience update the same
-  shared weights); a configurable fraction are instead played by frozen
-  snapshots of earlier policy versions sampled from an opponent pool, to
-  keep the policy robust rather than overfit to only beating itself.
+  per-hand-size running baseline, and the advantage (return minus baseline)
+  is normalized by a running std, not just mean-centered. Each *round* is
+  treated as an independent episode — a fresh deal that doesn't affect any
+  other round — so every decision a player makes in a round (the bid, and
+  each card played) shares that round's score as its return. Most seats each
+  game are played by the live policy (so gradients from every seat's
+  experience update the same shared weights); a configurable fraction are
+  instead played by frozen snapshots of earlier policy versions sampled from
+  an opponent pool, to keep the policy robust rather than overfit to only
+  beating itself.
+
+  **Why the std normalization matters:** round scores range roughly 0-17, so
+  un-normalized advantages can be an order of magnitude larger than a small
+  entropy bonus. An earlier version of this framework used `entropy_coef=0.01`
+  with un-normalized advantages, which let a 10k-game training run collapse
+  the bidding policy to *always* bid 0 regardless of hand strength (entropy
+  0.000) within the first ~40 iterations — a locally decent exploit (better
+  than random) but far below what an adaptive policy reaches, and with zero
+  entropy left there was nothing left to explore afterward. If your own
+  training run plateaus early with `eval_log.csv` going flat, check the
+  policy's output entropy on a few varied hands before assuming you just need
+  more iterations — it may need a larger `--entropy-coef` instead.
 - **`rl/evaluate.py`** benchmarks a trained policy (playing deterministically)
   against `SimpleBot` or `RandomBot` opponents over many games and reports
   average score and average finishing rank.

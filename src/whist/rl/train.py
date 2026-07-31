@@ -12,6 +12,14 @@ weights. To keep the policy robust rather than overfit to beating only
 itself, a configurable fraction of seats are instead played by frozen
 snapshots of past policy versions, sampled from an opponent pool that's
 periodically refreshed with the latest weights.
+
+The advantage (return minus baseline) is normalized by a running per-
+hand_size std, not just mean-centered. Round scores range roughly 0-17, so
+un-normalized advantages can be an order of magnitude larger than a modest
+entropy bonus -- with a small entropy_coef that lets the policy collapse to
+a degenerate near-deterministic strategy (e.g. "always bid 0") well before
+entropy regularization can push back, which then plateaus training since a
+policy with ~zero entropy has nothing left to explore.
 """
 
 from __future__ import annotations
@@ -33,19 +41,36 @@ DEFAULT_HIDDEN_CARD = 256
 
 
 class RunningBaseline:
-    """An exponential moving average return, tracked separately per
-    hand_size, used as a variance-reducing baseline for REINFORCE."""
+    """An exponential moving average return (and its spread), tracked
+    separately per hand_size, used to normalize the REINFORCE advantage.
+
+    Normalizing by std as well as subtracting the mean matters here: round
+    scores range roughly 0-17, so raw advantages can be an order of
+    magnitude larger than a small entropy bonus, which lets the policy
+    collapse to a degenerate near-deterministic strategy well before
+    entropy regularization has any chance to push back (see get_std)."""
 
     def __init__(self, momentum: float = 0.98) -> None:
         self.momentum = momentum
         self._values: dict[int, float] = {}
+        self._var: dict[int, float] = {}
 
     def get(self, hand_size: int) -> float:
         return self._values.get(hand_size, 0.0)
 
+    def get_std(self, hand_size: int, min_std: float = 1.0) -> float:
+        """Never returns less than min_std, both to avoid dividing by ~0
+        early on (before enough samples exist for a stable estimate) and to
+        keep the entropy bonus from becoming irrelevant once the policy
+        starts converging and true variance drops toward zero."""
+        return max(self._var.get(hand_size, 0.0) ** 0.5, min_std)
+
     def update(self, hand_size: int, value: float) -> None:
-        old = self._values.get(hand_size, value)
-        self._values[hand_size] = self.momentum * old + (1 - self.momentum) * value
+        old_mean = self._values.get(hand_size, value)
+        deviation_sq = (value - old_mean) ** 2
+        old_var = self._var.get(hand_size, deviation_sq)
+        self._values[hand_size] = self.momentum * old_mean + (1 - self.momentum) * value
+        self._var[hand_size] = self.momentum * old_var + (1 - self.momentum) * deviation_sq
 
 
 class OpponentPool:
@@ -140,7 +165,7 @@ def train(
     num_players: int = 4,
     lr_bid: float = 1e-3,
     lr_card: float = 1e-3,
-    entropy_coef: float = 0.01,
+    entropy_coef: float = 0.05,
     opponent_fraction: float = 0.3,
     snapshot_every: int = 10,
     pool_size: int = 10,
@@ -208,7 +233,7 @@ def train(
                         continue
                     ret = float(result.scores[seat.name])
                     round_scores.append(ret)
-                    advantage = ret - baseline.get(hand_size)
+                    advantage = (ret - baseline.get(hand_size)) / baseline.get_std(hand_size)
                     for step in steps:
                         loss = -advantage * step.log_prob - entropy_coef * step.entropy
                         (bid_losses if step.kind == "bid" else card_losses).append(loss)
@@ -322,7 +347,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-players", type=int, default=4)
     parser.add_argument("--lr-bid", type=float, default=1e-3)
     parser.add_argument("--lr-card", type=float, default=1e-3)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.05,
+        help="Exploration bonus weight. With normalized advantages (~O(1)), too low a value "
+        "(e.g. 0.01) lets the policy collapse to a degenerate near-deterministic strategy long "
+        "before it's found a good one -- watch the eval_log.csv learning curve for an early "
+        "plateau as a symptom.",
+    )
     parser.add_argument("--opponent-fraction", type=float, default=0.3)
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--pool-size", type=int, default=10)

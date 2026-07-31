@@ -1,3 +1,4 @@
+import inspect
 import random
 
 import pytest
@@ -139,6 +140,30 @@ def test_running_baseline_tracks_per_hand_size():
     baseline.update(3, 20.0)
     assert baseline.get(3) == pytest.approx(15.0)  # 0.5 * 10 + 0.5 * 20
     assert baseline.get(5) == 0.0  # different hand_size is independent
+
+
+def test_running_baseline_get_std_has_floor_and_grows_with_variance():
+    baseline = RunningBaseline(momentum=0.5)
+    assert baseline.get_std(3) == 1.0  # no data yet -> floor
+
+    baseline.update(3, 10.0)
+    assert baseline.get_std(3) == pytest.approx(1.0)  # single sample, zero deviation -> floor
+
+    baseline.update(3, 0.0)  # far from the running mean -> variance should grow past the floor
+    assert baseline.get_std(3) > 1.0
+
+    baseline_low_var = RunningBaseline(momentum=0.5)
+    baseline_low_var.update(3, 10.0)
+    baseline_low_var.update(3, 10.5)  # small deviation -> still floored, shouldn't dip below min_std
+    assert baseline_low_var.get_std(3) == pytest.approx(1.0)
+
+
+def test_default_entropy_coef_is_not_negligible_relative_to_normalized_advantage():
+    # Regression guard: with normalized (~O(1)) advantages, entropy_coef needs to be large enough
+    # that the exploration bonus isn't swamped -- see the entropy-collapse writeup in train.py's
+    # module docstring. 0.01 was observed to let the policy collapse to a degenerate strategy.
+    default = inspect.signature(train).parameters["entropy_coef"].default
+    assert default >= 0.03
 
 
 def test_opponent_pool_freezes_snapshots():
