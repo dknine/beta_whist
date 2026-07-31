@@ -108,8 +108,34 @@ python -m whist.rl.train --iterations 200 --games-per-iteration 8 --num-players 
 
 Key flags: `--opponent-fraction` (how often a seat is a frozen past snapshot
 instead of the live policy), `--snapshot-every` (how many iterations between
-adding a new snapshot to the opponent pool), `--entropy-coef` (exploration
-bonus), `--lr-bid`/`--lr-card`, `--device` (`cpu` / `cuda` / `auto`).
+adding a new snapshot to the opponent pool *and* checkpointing to
+`--save-dir`), `--entropy-coef` (exploration bonus), `--lr-bid`/`--lr-card`,
+`--device` (`cpu` / `cuda` / `auto`).
+
+**Training over multiple sessions:** `train()` normally starts from random
+weights every call. Pass `--resume-from <dir>` (typically the same as
+`--save-dir`) to continue from a checkpoint instead — this restores both the
+policy weights and the Adam optimizer momentum, and iteration numbers in the
+logs keep counting up across sessions rather than resetting to 1:
+
+```powershell
+python -m whist.rl.train --iterations 1000 --save-dir models
+# ...later, or in a different process...
+python -m whist.rl.train --iterations 1000 --save-dir models --resume-from models
+```
+
+**Tracking a learning curve:** the per-iteration log line is the *self-play*
+score, which is noisy and not directly comparable across training stages
+(early on, a self-play "win" might just mean out-bidding an equally
+untrained opponent). To see whether the policy is actually improving, use
+`--eval-every N`: every N iterations it plays `--eval-games` deterministic
+games against `--eval-opponent` (`simple` or `random`) and logs the RL bot's
+average score/rank, also appending each point to `--save-dir/eval_log.csv`
+so you can plot it afterward:
+
+```powershell
+python -m whist.rl.train --iterations 1000 --save-dir models --eval-every 50 --eval-games 30
+```
 
 **GPU:** `whist.rl` will use CUDA if you pass `--device cuda` (or `auto`
 with a GPU present) and a CUDA build of PyTorch is installed

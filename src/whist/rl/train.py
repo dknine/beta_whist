@@ -105,6 +105,35 @@ def _build_seats(
     return seats
 
 
+def _quick_eval(
+    bidding_policy: BiddingPolicy,
+    card_policy: CardPlayPolicy,
+    num_players: int,
+    opponent: str,
+    num_games: int,
+    device: torch.device,
+    rng: random.Random,
+) -> tuple[float, float]:
+    """Play `num_games` games of the current policy (deterministic) against
+    heuristic bots and return (avg_score, avg_rank) for the RL seat. Lazily
+    imports from .evaluate to avoid a circular import (evaluate.py imports
+    from this module at load time)."""
+    from .evaluate import build_players
+
+    total_score = 0.0
+    total_rank = 0.0
+    for _ in range(num_games):
+        players = build_players(bidding_policy, card_policy, num_players, opponent, rng, device)
+        game = WhistGame(players, rng=random.Random(rng.randrange(2**32)))
+        game.play_game()
+        for rank, (name, score) in enumerate(game.standings(), start=1):
+            if name == "RLBot":
+                total_score += score
+                total_rank += rank
+                break
+    return total_score / num_games, total_rank / num_games
+
+
 def train(
     iterations: int = 200,
     games_per_iteration: int = 8,
@@ -120,20 +149,47 @@ def train(
     log_every: int = 1,
     on_log: callable = print,
     device: str | torch.device | None = "cpu",
+    resume_from: str | Path | None = None,
+    eval_every: int = 0,
+    eval_opponent: str = "simple",
+    eval_games: int = 20,
 ) -> tuple[BiddingPolicy, CardPlayPolicy]:
+    """Run self-play REINFORCE training.
+
+    Set `resume_from` to a directory previously written by this function
+    (typically the same as `save_dir`, across two separate calls/processes)
+    to continue training an existing policy instead of starting from random
+    weights -- this also restores optimizer momentum and the absolute
+    iteration count, so logged iteration numbers keep counting up across
+    resumes rather than resetting to 1. The opponent pool itself is *not*
+    persisted; it's reseeded from the resumed weights.
+
+    Set `eval_every` > 0 to periodically play `eval_games` deterministic
+    games against `eval_opponent` ("simple" or "random") during training and
+    log the result -- this is what gives you a learning curve rather than
+    just the noisy self-play training score. If `save_dir` is set, each
+    evaluation is also appended as a CSV row to `save_dir/eval_log.csv`.
+    """
     rng = random.Random(seed)
     device = resolve_device(device)
 
-    bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID).to(device)
-    card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD).to(device)
-    bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
-    card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
+    if resume_from is not None:
+        bidding_policy, card_policy = load_policies(resume_from, device=device)
+        bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
+        card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
+        start_iteration = _load_optimizer_state(resume_from, bidding_opt, card_opt, device)
+    else:
+        bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID).to(device)
+        card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD).to(device)
+        bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
+        card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
+        start_iteration = 0
 
     pool = OpponentPool(max_size=pool_size)
     pool.add(bidding_policy, card_policy)  # seed the pool so opponent_fraction has something to sample
     baseline = RunningBaseline()
 
-    for iteration in range(1, iterations + 1):
+    for iteration in range(start_iteration + 1, start_iteration + iterations + 1):
         bid_losses: list[torch.Tensor] = []
         card_losses: list[torch.Tensor] = []
         round_scores: list[float] = []
@@ -169,17 +225,32 @@ def train(
 
         if iteration % snapshot_every == 0:
             pool.add(bidding_policy, card_policy)
+            if save_dir is not None:
+                save_policies(bidding_policy, card_policy, save_dir)
+                _save_optimizer_state(save_dir, bidding_opt, card_opt, iteration)
 
         if log_every and iteration % log_every == 0:
             avg_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
             on_log(
-                f"iter {iteration}/{iterations}  avg round score {avg_score:.2f}  "
+                f"iter {iteration}  avg round score {avg_score:.2f}  "
                 f"bid steps {len(bid_losses)}  card steps {len(card_losses)}  "
                 f"pool size {len(pool.snapshots)}"
             )
 
+        if eval_every and iteration % eval_every == 0:
+            avg_eval_score, avg_eval_rank = _quick_eval(
+                bidding_policy, card_policy, num_players, eval_opponent, eval_games, device, rng
+            )
+            on_log(
+                f"  eval @ iter {iteration}: vs {eval_opponent} over {eval_games} games -> "
+                f"avg score {avg_eval_score:.1f}, avg rank {avg_eval_rank:.2f}"
+            )
+            if save_dir is not None:
+                _append_eval_log(save_dir, iteration, avg_eval_score, avg_eval_rank)
+
     if save_dir is not None:
         save_policies(bidding_policy, card_policy, save_dir)
+        _save_optimizer_state(save_dir, bidding_opt, card_opt, start_iteration + iterations)
 
     return bidding_policy, card_policy
 
@@ -208,6 +279,42 @@ def load_policies(
     return bidding_policy.to(device), card_policy.to(device)
 
 
+def _save_optimizer_state(save_dir: str | Path, bidding_opt: optim.Optimizer, card_opt: optim.Optimizer, iteration: int) -> None:
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"bidding_opt": bidding_opt.state_dict(), "card_opt": card_opt.state_dict(), "iteration": iteration},
+        save_dir / "training_state.pt",
+    )
+
+
+def _load_optimizer_state(
+    save_dir: str | Path, bidding_opt: optim.Optimizer, card_opt: optim.Optimizer, device: torch.device
+) -> int:
+    """Load optimizer momentum + iteration count if present; returns the
+    iteration to resume from (0 if there's no saved training state, e.g. a
+    checkpoint written before this feature existed, or the plain output of
+    save_policies() alone)."""
+    state_path = Path(save_dir) / "training_state.pt"
+    if not state_path.exists():
+        return 0
+    state = torch.load(state_path, map_location=device, weights_only=True)
+    bidding_opt.load_state_dict(state["bidding_opt"])
+    card_opt.load_state_dict(state["card_opt"])
+    return state["iteration"]
+
+
+def _append_eval_log(save_dir: str | Path, iteration: int, avg_score: float, avg_rank: float) -> None:
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    log_path = save_dir / "eval_log.csv"
+    is_new = not log_path.exists()
+    with open(log_path, "a", encoding="utf-8") as f:
+        if is_new:
+            f.write("iteration,avg_score,avg_rank\n")
+        f.write(f"{iteration},{avg_score},{avg_rank}\n")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Contract Whist RL bots via self-play REINFORCE.")
     parser.add_argument("--iterations", type=int, default=200)
@@ -230,6 +337,22 @@ def _parse_args() -> argparse.Namespace:
         "networks doing single-sample inference interleaved with game logic, so GPU kernel-launch/"
         "transfer overhead usually makes 'cuda' slower here, not faster.",
     )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Directory with a previous checkpoint (weights + optimizer state) to continue training "
+        "from, instead of starting from random weights. Iteration numbers keep counting up.",
+    )
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=0,
+        help="Every N iterations, play --eval-games deterministic games against --eval-opponent and "
+        "log avg score/rank (and append to save-dir/eval_log.csv). 0 disables periodic evaluation.",
+    )
+    parser.add_argument("--eval-opponent", choices=("simple", "random"), default="simple")
+    parser.add_argument("--eval-games", type=int, default=20)
     return parser.parse_args()
 
 
@@ -249,6 +372,10 @@ def main() -> None:
         save_dir=args.save_dir,
         log_every=args.log_every,
         device=args.device,
+        resume_from=args.resume_from,
+        eval_every=args.eval_every,
+        eval_opponent=args.eval_opponent,
+        eval_games=args.eval_games,
     )
 
 

@@ -187,3 +187,78 @@ def test_short_training_run_completes_and_saves(tmp_path):
         assert torch.equal(a, b)
     for a, b in zip(card_policy.parameters(), loaded_card.parameters()):
         assert torch.equal(a, b)
+
+
+def test_resume_from_continues_absolute_iteration_count(tmp_path):
+    train(
+        iterations=2,
+        games_per_iteration=2,
+        num_players=3,
+        snapshot_every=1,
+        seed=0,
+        save_dir=tmp_path,
+        log_every=0,
+        on_log=lambda msg: None,
+    )
+    assert (tmp_path / "training_state.pt").exists()
+    state = torch.load(tmp_path / "training_state.pt", weights_only=True)
+    assert state["iteration"] == 2
+
+    logged = []
+    train(
+        iterations=3,
+        games_per_iteration=2,
+        num_players=3,
+        snapshot_every=1,
+        seed=1,
+        save_dir=tmp_path,
+        resume_from=tmp_path,
+        log_every=1,
+        on_log=logged.append,
+    )
+    state = torch.load(tmp_path / "training_state.pt", weights_only=True)
+    assert state["iteration"] == 5  # 2 (previous run) + 3 (this run)
+    assert any(msg.startswith("iter 3 ") for msg in logged)  # first resumed iteration is 3, not 1
+    assert any(msg.startswith("iter 5 ") for msg in logged)
+
+
+def test_resume_from_weights_only_checkpoint_starts_at_iteration_zero(tmp_path):
+    bidding_policy, card_policy = train(
+        iterations=1, games_per_iteration=1, num_players=3, seed=0, log_every=0, on_log=lambda m: None
+    )
+    save_policies(bidding_policy, card_policy, tmp_path)  # no training_state.pt written
+
+    logged = []
+    train(
+        iterations=1,
+        games_per_iteration=1,
+        num_players=3,
+        seed=0,
+        resume_from=tmp_path,
+        log_every=1,
+        on_log=logged.append,
+    )
+    assert any(msg.startswith("iter 1 ") for msg in logged)  # missing training_state.pt -> resumes at 0
+
+
+def test_eval_every_logs_and_appends_csv(tmp_path):
+    logged = []
+    train(
+        iterations=4,
+        games_per_iteration=2,
+        num_players=3,
+        snapshot_every=2,
+        seed=0,
+        save_dir=tmp_path,
+        log_every=0,
+        eval_every=2,
+        eval_games=2,
+        on_log=logged.append,
+    )
+    assert sum(1 for msg in logged if "eval @ iter" in msg) == 2  # iterations 2 and 4
+
+    log_path = tmp_path / "eval_log.csv"
+    assert log_path.exists()
+    lines = log_path.read_text().strip().splitlines()
+    assert lines[0] == "iteration,avg_score,avg_rank"
+    assert len(lines) == 3  # header + 2 eval points
