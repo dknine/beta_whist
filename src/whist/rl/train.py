@@ -70,6 +70,13 @@ class OpponentPool:
         return rng.choice(self.snapshots) if self.snapshots else None
 
 
+def resolve_device(device: str | torch.device | None) -> torch.device:
+    """None/"auto" picks CUDA if available, else CPU."""
+    if device is None or device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
+
+
 def _build_seats(
     num_players: int,
     bidding_policy: BiddingPolicy,
@@ -77,6 +84,7 @@ def _build_seats(
     pool: OpponentPool,
     opponent_fraction: float,
     rng: random.Random,
+    device: torch.device,
 ) -> list[RLPlayer]:
     """One seat is always the live, training policy so every game yields
     gradient data; the rest are live with probability (1 - opponent_fraction)
@@ -87,9 +95,13 @@ def _build_seats(
         use_opponent = i != guaranteed_live_seat and pool.snapshots and rng.random() < opponent_fraction
         if use_opponent:
             frozen_bid, frozen_card = pool.sample(rng)
-            seats.append(RLPlayer(f"Seat{i}", frozen_bid, frozen_card, training=False, rng=rng))
+            seats.append(
+                RLPlayer(f"Seat{i}", frozen_bid, frozen_card, training=False, rng=rng, device=device)
+            )
         else:
-            seats.append(RLPlayer(f"Seat{i}", bidding_policy, card_policy, training=True, rng=rng))
+            seats.append(
+                RLPlayer(f"Seat{i}", bidding_policy, card_policy, training=True, rng=rng, device=device)
+            )
     return seats
 
 
@@ -107,11 +119,13 @@ def train(
     save_dir: str | Path | None = None,
     log_every: int = 1,
     on_log: callable = print,
+    device: str | torch.device | None = "cpu",
 ) -> tuple[BiddingPolicy, CardPlayPolicy]:
     rng = random.Random(seed)
+    device = resolve_device(device)
 
-    bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID)
-    card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD)
+    bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID).to(device)
+    card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD).to(device)
     bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
     card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
 
@@ -125,7 +139,9 @@ def train(
         round_scores: list[float] = []
 
         for _ in range(games_per_iteration):
-            seats = _build_seats(num_players, bidding_policy, card_policy, pool, opponent_fraction, rng)
+            seats = _build_seats(
+                num_players, bidding_policy, card_policy, pool, opponent_fraction, rng, device
+            )
             game = WhistGame(seats, rng=random.Random(rng.randrange(2**32)))
 
             for hand_size in game.round_sequence():
@@ -171,17 +187,25 @@ def train(
 def save_policies(bidding_policy: BiddingPolicy, card_policy: CardPlayPolicy, save_dir: str | Path) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(bidding_policy.state_dict(), save_dir / "bidding_policy.pt")
-    torch.save(card_policy.state_dict(), save_dir / "card_policy.pt")
+    # Always save CPU tensors so checkpoints load fine on machines without a GPU.
+    torch.save({k: v.cpu() for k, v in bidding_policy.state_dict().items()}, save_dir / "bidding_policy.pt")
+    torch.save({k: v.cpu() for k, v in card_policy.state_dict().items()}, save_dir / "card_policy.pt")
 
 
-def load_policies(save_dir: str | Path) -> tuple[BiddingPolicy, CardPlayPolicy]:
+def load_policies(
+    save_dir: str | Path, device: str | torch.device | None = "cpu"
+) -> tuple[BiddingPolicy, CardPlayPolicy]:
     save_dir = Path(save_dir)
+    device = resolve_device(device)
     bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID)
     card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD)
-    bidding_policy.load_state_dict(torch.load(save_dir / "bidding_policy.pt", weights_only=True))
-    card_policy.load_state_dict(torch.load(save_dir / "card_policy.pt", weights_only=True))
-    return bidding_policy, card_policy
+    bidding_policy.load_state_dict(
+        torch.load(save_dir / "bidding_policy.pt", map_location="cpu", weights_only=True)
+    )
+    card_policy.load_state_dict(
+        torch.load(save_dir / "card_policy.pt", map_location="cpu", weights_only=True)
+    )
+    return bidding_policy.to(device), card_policy.to(device)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -198,6 +222,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--save-dir", type=str, default="models")
     parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="'cpu', 'cuda', or 'auto' (cuda if available else cpu). Default 'cpu': these are tiny "
+        "networks doing single-sample inference interleaved with game logic, so GPU kernel-launch/"
+        "transfer overhead usually makes 'cuda' slower here, not faster.",
+    )
     return parser.parse_args()
 
 
@@ -216,6 +248,7 @@ def main() -> None:
         seed=args.seed,
         save_dir=args.save_dir,
         log_every=args.log_every,
+        device=args.device,
     )
 
 

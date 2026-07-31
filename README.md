@@ -109,7 +109,19 @@ python -m whist.rl.train --iterations 200 --games-per-iteration 8 --num-players 
 Key flags: `--opponent-fraction` (how often a seat is a frozen past snapshot
 instead of the live policy), `--snapshot-every` (how many iterations between
 adding a new snapshot to the opponent pool), `--entropy-coef` (exploration
-bonus), `--lr-bid`/`--lr-card`.
+bonus), `--lr-bid`/`--lr-card`, `--device` (`cpu` / `cuda` / `auto`).
+
+**GPU:** `whist.rl` will use CUDA if you pass `--device cuda` (or `auto`
+with a GPU present) and a CUDA build of PyTorch is installed
+(`pip install torch --index-url https://download.pytorch.org/whl/cu130`, or
+whichever tag matches your driver's max supported CUDA version from
+`nvidia-smi`). That said, the default is `cpu` on purpose: these are small
+MLPs doing single-sample inference interleaved with per-turn game logic
+(batch size 1, one forward pass per bid/card decision), so GPU
+transfer/kernel-launch overhead tends to make training *slower* than CPU,
+not faster, at this scale. GPU would start winning if the training loop
+were changed to batch many simultaneous game rollouts into one forward pass
+— it doesn't currently do that.
 
 **Evaluate a trained bot:**
 

@@ -49,6 +49,7 @@ class RLPlayer(Player):
         training: bool = False,
         deterministic: bool = False,
         rng: random.Random | None = None,
+        device: torch.device | str = "cpu",
     ) -> None:
         super().__init__(name)
         self.bidding_policy = bidding_policy
@@ -57,6 +58,7 @@ class RLPlayer(Player):
         self.deterministic = deterministic
         self._rng = rng or random.Random()
         self._round_steps: list[TrajectoryStep] = []
+        self.device = torch.device(device)
 
     def pop_round_steps(self) -> list[TrajectoryStep]:
         """Return and clear this player's recorded decisions for the round
@@ -73,8 +75,8 @@ class RLPlayer(Player):
         return self._rng.choice(candidates)
 
     def choose_bid(self, state: BiddingState) -> int:
-        features = encode_bidding_state(state, self.consecutive_zero_bids)
-        mask = bidding_action_mask(state)
+        features = encode_bidding_state(state, self.consecutive_zero_bids).to(self.device)
+        mask = bidding_action_mask(state).to(self.device)
 
         if self.training_mode:
             logits = self.bidding_policy(features)
@@ -94,8 +96,8 @@ class RLPlayer(Player):
         return int(action.item())
 
     def choose_card(self, state: TrickState) -> Card:
-        features = encode_trick_state(state, self.bid, self.tricks_won)
-        mask = card_action_mask(state.valid_cards)
+        features = encode_trick_state(state, self.bid, self.tricks_won).to(self.device)
+        mask = card_action_mask(state.valid_cards).to(self.device)
 
         if self.training_mode:
             logits = self.card_policy(features)
