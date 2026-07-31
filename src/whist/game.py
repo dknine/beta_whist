@@ -175,6 +175,7 @@ class WhistGame:
                     led_suit=led_suit,
                     cards_played=list(cards_played),
                     trick_number=trick_no,
+                    num_players=n,
                 )
                 card = player.choose_card(state)
                 if card not in valid:

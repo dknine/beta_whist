@@ -47,6 +47,7 @@ class TrickState:
     led_suit: Suit | None
     cards_played: list[tuple[str, Card]]  # (player_name, card) so far this trick
     trick_number: int  # 0-indexed within the round
+    num_players: int
 
 
 class Player(ABC):

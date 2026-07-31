@@ -11,9 +11,12 @@ readme = "README.md"
 
 [project.optional-dependencies]
 dev = ["pytest"]
+rl = ["torch>=2.0"]
 
 [project.scripts]
 whist-play = "whist.cli:main"
+whist-train = "whist.rl.train:main"
+whist-evaluate = "whist.rl.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
