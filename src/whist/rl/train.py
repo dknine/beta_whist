@@ -6,20 +6,38 @@ So every decision (the single bid, and each of the hand_size card plays) a
 player makes during a round shares that round's score as its Monte-Carlo
 return -- there's no cross-round credit assignment to worry about.
 
+The baseline subtracted from the return is a learned critic (actor-critic):
+BiddingValueNet/CardValueNet predict V(s), the expected round score from
+that decision point, conditioned on the actual state (hand strength, bids
+so far, etc.) -- not just a per-hand_size average like the earlier scalar
+EMA baseline. Conditioning on state removes far more variance from the
+policy gradient, since e.g. "this specific strong hand" and "this specific
+weak hand" of the same size no longer share one baseline value. The critic
+is trained via Monte-Carlo regression toward the round's actual score
+(consistent with this framework's "each round is an independent episode"
+design), not TD(0) bootstrapping -- that's Q-learning's (qtrain.py)
+distinguishing feature; keeping this critic MC-based keeps a clean
+conceptual line between "REINFORCE with a learned baseline" and "true" TD
+actor-critic.
+
+The resulting advantage (return minus V(s)) is additionally normalized by a
+running per-hand_size std of that residual (RunningBaseline.get_std) before
+weighting the policy gradient. This still matters even with a learned
+baseline: round scores range roughly 0-17, so un-normalized advantages can
+be an order of magnitude larger than a modest entropy bonus -- with too
+small an entropy_coef that lets the policy collapse to a degenerate
+near-deterministic strategy (e.g. "always bid 0") well before entropy
+regularization can push back, which then plateaus training since a policy
+with ~zero entropy has nothing left to explore.
+
 Self-play: most seats each game are played by the current ("live") policy,
 so gradients from every seat's experience flow into the same shared
 weights. To keep the policy robust rather than overfit to beating only
 itself, a configurable fraction of seats are instead played by frozen
 snapshots of past policy versions, sampled from an opponent pool that's
-periodically refreshed with the latest weights.
-
-The advantage (return minus baseline) is normalized by a running per-
-hand_size std, not just mean-centered. Round scores range roughly 0-17, so
-un-normalized advantages can be an order of magnitude larger than a modest
-entropy bonus -- with a small entropy_coef that lets the policy collapse to
-a degenerate near-deterministic strategy (e.g. "always bid 0") well before
-entropy regularization can push back, which then plateaus training since a
-policy with ~zero entropy has nothing left to explore.
+periodically refreshed with the latest weights. The critic is never used
+for acting (RLPlayer only ever samples from the policy), so it plays no
+role in the opponent pool -- only the policy weights are snapshotted there.
 """
 
 from __future__ import annotations
@@ -34,6 +52,7 @@ from torch import optim
 
 from ..game import WhistGame
 from .agent import RLPlayer
+from .critic import BiddingValueNet, CardValueNet
 from .policy import BiddingPolicy, CardPlayPolicy
 
 DEFAULT_HIDDEN_BID = 128
@@ -165,6 +184,7 @@ def train(
     num_players: int = 4,
     lr_bid: float = 1e-3,
     lr_card: float = 1e-3,
+    lr_critic: float = 1e-3,
     entropy_coef: float = 0.05,
     opponent_fraction: float = 0.3,
     snapshot_every: int = 10,
@@ -200,23 +220,33 @@ def train(
 
     if resume_from is not None:
         bidding_policy, card_policy = load_policies(resume_from, device=device)
+        bidding_critic, card_critic = load_critics(resume_from, device=device)
         bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
         card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
+        bidding_critic_opt = optim.Adam(bidding_critic.parameters(), lr=lr_critic)
+        card_critic_opt = optim.Adam(card_critic.parameters(), lr=lr_critic)
         start_iteration = _load_optimizer_state(resume_from, bidding_opt, card_opt, device)
+        _load_critic_optimizer_state(resume_from, bidding_critic_opt, card_critic_opt, device)
     else:
         bidding_policy = BiddingPolicy(DEFAULT_HIDDEN_BID).to(device)
         card_policy = CardPlayPolicy(DEFAULT_HIDDEN_CARD).to(device)
+        bidding_critic = BiddingValueNet(DEFAULT_HIDDEN_BID).to(device)
+        card_critic = CardValueNet(DEFAULT_HIDDEN_CARD).to(device)
         bidding_opt = optim.Adam(bidding_policy.parameters(), lr=lr_bid)
         card_opt = optim.Adam(card_policy.parameters(), lr=lr_card)
+        bidding_critic_opt = optim.Adam(bidding_critic.parameters(), lr=lr_critic)
+        card_critic_opt = optim.Adam(card_critic.parameters(), lr=lr_critic)
         start_iteration = 0
 
     pool = OpponentPool(max_size=pool_size)
     pool.add(bidding_policy, card_policy)  # seed the pool so opponent_fraction has something to sample
-    baseline = RunningBaseline()
+    baseline = RunningBaseline()  # now tracks std of the (return - V(s)) residual, not the raw return
 
     for iteration in range(start_iteration + 1, start_iteration + iterations + 1):
         bid_losses: list[torch.Tensor] = []
         card_losses: list[torch.Tensor] = []
+        bid_critic_losses: list[torch.Tensor] = []
+        card_critic_losses: list[torch.Tensor] = []
         round_scores: list[float] = []
 
         for _ in range(games_per_iteration):
@@ -233,11 +263,23 @@ def train(
                         continue
                     ret = float(result.scores[seat.name])
                     round_scores.append(ret)
-                    advantage = (ret - baseline.get(hand_size)) / baseline.get_std(hand_size)
+                    ret_tensor = torch.tensor(ret, device=device)
+
                     for step in steps:
-                        loss = -advantage * step.log_prob - entropy_coef * step.entropy
-                        (bid_losses if step.kind == "bid" else card_losses).append(loss)
-                    baseline.update(hand_size, ret)
+                        value_net = bidding_critic if step.kind == "bid" else card_critic
+                        predicted_value = value_net(step.features)
+                        residual = ret - predicted_value.detach().item()
+                        normalized_advantage = residual / baseline.get_std(hand_size)
+                        baseline.update(hand_size, residual)
+
+                        actor_loss = -normalized_advantage * step.log_prob - entropy_coef * step.entropy
+                        critic_loss = (predicted_value - ret_tensor) ** 2
+                        if step.kind == "bid":
+                            bid_losses.append(actor_loss)
+                            bid_critic_losses.append(critic_loss)
+                        else:
+                            card_losses.append(actor_loss)
+                            card_critic_losses.append(critic_loss)
 
         if bid_losses:
             bidding_opt.zero_grad()
@@ -247,12 +289,22 @@ def train(
             card_opt.zero_grad()
             torch.stack(card_losses).mean().backward()
             card_opt.step()
+        if bid_critic_losses:
+            bidding_critic_opt.zero_grad()
+            torch.stack(bid_critic_losses).mean().backward()
+            bidding_critic_opt.step()
+        if card_critic_losses:
+            card_critic_opt.zero_grad()
+            torch.stack(card_critic_losses).mean().backward()
+            card_critic_opt.step()
 
         if iteration % snapshot_every == 0:
             pool.add(bidding_policy, card_policy)
             if save_dir is not None:
                 save_policies(bidding_policy, card_policy, save_dir)
+                save_critics(bidding_critic, card_critic, save_dir)
                 _save_optimizer_state(save_dir, bidding_opt, card_opt, iteration)
+                _save_critic_optimizer_state(save_dir, bidding_critic_opt, card_critic_opt)
 
         if log_every and iteration % log_every == 0:
             avg_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
@@ -275,7 +327,9 @@ def train(
 
     if save_dir is not None:
         save_policies(bidding_policy, card_policy, save_dir)
+        save_critics(bidding_critic, card_critic, save_dir)
         _save_optimizer_state(save_dir, bidding_opt, card_opt, start_iteration + iterations)
+        _save_critic_optimizer_state(save_dir, bidding_critic_opt, card_critic_opt)
 
     return bidding_policy, card_policy
 
@@ -304,6 +358,33 @@ def load_policies(
     return bidding_policy.to(device), card_policy.to(device)
 
 
+def save_critics(bidding_critic: BiddingValueNet, card_critic: CardValueNet, save_dir: str | Path) -> None:
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({k: v.cpu() for k, v in bidding_critic.state_dict().items()}, save_dir / "bidding_critic.pt")
+    torch.save({k: v.cpu() for k, v in card_critic.state_dict().items()}, save_dir / "card_critic.pt")
+
+
+def load_critics(
+    save_dir: str | Path, device: str | torch.device | None = "cpu"
+) -> tuple[BiddingValueNet, CardValueNet]:
+    """Loads saved critic weights if present, else returns freshly
+    initialized ones -- lets resume_from work against older checkpoints
+    written before critics existed (the critic just starts learning from
+    scratch again, same as a fresh run's critic would)."""
+    save_dir = Path(save_dir)
+    device = resolve_device(device)
+    bidding_critic = BiddingValueNet(DEFAULT_HIDDEN_BID)
+    card_critic = CardValueNet(DEFAULT_HIDDEN_CARD)
+    bid_path = save_dir / "bidding_critic.pt"
+    card_path = save_dir / "card_critic.pt"
+    if bid_path.exists():
+        bidding_critic.load_state_dict(torch.load(bid_path, map_location="cpu", weights_only=True))
+    if card_path.exists():
+        card_critic.load_state_dict(torch.load(card_path, map_location="cpu", weights_only=True))
+    return bidding_critic.to(device), card_critic.to(device)
+
+
 def _save_optimizer_state(save_dir: str | Path, bidding_opt: optim.Optimizer, card_opt: optim.Optimizer, iteration: int) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -329,6 +410,34 @@ def _load_optimizer_state(
     return state["iteration"]
 
 
+def _save_critic_optimizer_state(
+    save_dir: str | Path, bidding_critic_opt: optim.Optimizer, card_critic_opt: optim.Optimizer
+) -> None:
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"bidding_critic_opt": bidding_critic_opt.state_dict(), "card_critic_opt": card_critic_opt.state_dict()},
+        save_dir / "critic_training_state.pt",
+    )
+
+
+def _load_critic_optimizer_state(
+    save_dir: str | Path,
+    bidding_critic_opt: optim.Optimizer,
+    card_critic_opt: optim.Optimizer,
+    device: torch.device,
+) -> None:
+    """No-op (fresh critic optimizer momentum) if there's no saved critic
+    training state, e.g. resuming from a checkpoint written before critics
+    existed."""
+    state_path = Path(save_dir) / "critic_training_state.pt"
+    if not state_path.exists():
+        return
+    state = torch.load(state_path, map_location=device, weights_only=True)
+    bidding_critic_opt.load_state_dict(state["bidding_critic_opt"])
+    card_critic_opt.load_state_dict(state["card_critic_opt"])
+
+
 def _append_eval_log(save_dir: str | Path, iteration: int, avg_score: float, avg_rank: float) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -347,6 +456,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-players", type=int, default=4)
     parser.add_argument("--lr-bid", type=float, default=1e-3)
     parser.add_argument("--lr-card", type=float, default=1e-3)
+    parser.add_argument("--lr-critic", type=float, default=1e-3, help="Learning rate for the value-baseline critics.")
     parser.add_argument(
         "--entropy-coef",
         type=float,
@@ -397,6 +507,7 @@ def main() -> None:
         num_players=args.num_players,
         lr_bid=args.lr_bid,
         lr_card=args.lr_card,
+        lr_critic=args.lr_critic,
         entropy_coef=args.entropy_coef,
         opponent_fraction=args.opponent_fraction,
         snapshot_every=args.snapshot_every,

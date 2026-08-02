@@ -87,29 +87,46 @@ python -m pip install --user -e .[rl]
   policy distribution and records each decision's log-prob for later use in
   the loss; in `training=False` mode it either samples (for use as a training
   opponent) or plays greedily via `deterministic=True` (for evaluation).
-- **Training algorithm** (`rl/train.py`): self-play REINFORCE with a
-  per-hand-size running baseline, and the advantage (return minus baseline)
-  is normalized by a running std, not just mean-centered. Each *round* is
-  treated as an independent episode — a fresh deal that doesn't affect any
-  other round — so every decision a player makes in a round (the bid, and
-  each card played) shares that round's score as its return. Most seats each
-  game are played by the live policy (so gradients from every seat's
+- **Training algorithm** (`rl/train.py`): self-play REINFORCE, actor-critic
+  style — `BiddingValueNet`/`CardValueNet` (`rl/critic.py`) are learned value
+  baselines, predicting expected round score conditioned on the actual state
+  (hand strength, bids so far, etc.), trained via Monte-Carlo regression
+  toward the round's real score. The advantage (return minus the critic's
+  prediction) is additionally normalized by a running per-hand-size std
+  before weighting the policy gradient. Each *round* is treated as an
+  independent episode — a fresh deal that doesn't affect any other round —
+  so every decision a player makes in a round (the bid, and each card
+  played) shares that round's score as its return; the critic is never used
+  for acting, only for computing the baseline during training. Most seats
+  each game are played by the live policy (so gradients from every seat's
   experience update the same shared weights); a configurable fraction are
   instead played by frozen snapshots of earlier policy versions sampled from
   an opponent pool, to keep the policy robust rather than overfit to only
   beating itself.
 
-  **Why the std normalization matters:** round scores range roughly 0-17, so
-  un-normalized advantages can be an order of magnitude larger than a small
-  entropy bonus. An earlier version of this framework used `entropy_coef=0.01`
-  with un-normalized advantages, which let a 10k-game training run collapse
-  the bidding policy to *always* bid 0 regardless of hand strength (entropy
-  0.000) within the first ~40 iterations — a locally decent exploit (better
-  than random) but far below what an adaptive policy reaches, and with zero
-  entropy left there was nothing left to explore afterward. If your own
-  training run plateaus early with `eval_log.csv` going flat, check the
-  policy's output entropy on a few varied hands before assuming you just need
-  more iterations — it may need a larger `--entropy-coef` instead.
+  **Why a learned, state-conditioned baseline:** an earlier version used a
+  scalar per-hand-size EMA baseline instead of a critic. That's a much
+  cruder variance reducer — "the average round score for a 5-card hand"
+  gives the same baseline whether you were dealt a strong hand or a weak
+  one, so most of the score's actual variance leaks straight into the
+  policy gradient as noise. On a 10k-game run with the EMA baseline, REINFORCE
+  plateaued almost immediately (~60-65 avg score vs a heuristic bot,
+  never improving) even after fixing an earlier entropy-collapse bug and
+  tuning the learning rate — the credit-assignment signal was just too
+  noisy for the policy to make sense of. The critic addresses this directly.
+
+  **Why the std normalization still matters even with a critic:** round
+  scores range roughly 0-17, so un-normalized advantages can be an order of
+  magnitude larger than a small entropy bonus. An earlier version of this
+  framework used `entropy_coef=0.01` with un-normalized advantages, which
+  let training collapse the bidding policy to *always* bid 0 regardless of
+  hand strength (entropy 0.000) within the first ~40 iterations — a locally
+  decent exploit (better than random) but far below what an adaptive policy
+  reaches, and with zero entropy left there was nothing left to explore
+  afterward. If your own training run plateaus early with `eval_log.csv`
+  going flat, check the policy's output entropy on a few varied hands before
+  assuming you just need more iterations — it may need a larger
+  `--entropy-coef` instead.
 - **`rl/evaluate.py`** benchmarks a trained policy (playing deterministically)
   against `SimpleBot` or `RandomBot` opponents over many games and reports
   average score and average finishing rank.
@@ -123,8 +140,8 @@ python -m whist.rl.train --iterations 200 --games-per-iteration 8 --num-players 
 Key flags: `--opponent-fraction` (how often a seat is a frozen past snapshot
 instead of the live policy), `--snapshot-every` (how many iterations between
 adding a new snapshot to the opponent pool *and* checkpointing to
-`--save-dir`), `--entropy-coef` (exploration bonus), `--lr-bid`/`--lr-card`,
-`--device` (`cpu` / `cuda` / `auto`).
+`--save-dir`), `--entropy-coef` (exploration bonus), `--lr-bid`/`--lr-card`/
+`--lr-critic`, `--device` (`cpu` / `cuda` / `auto`).
 
 **Training over multiple sessions:** `train()` normally starts from random
 weights every call. Pass `--resume-from <dir>` (typically the same as
@@ -198,7 +215,7 @@ once:
 | Action selection | Sample from learned distribution | Epsilon-greedy over Q-values |
 | Bidding target | Advantage-weighted log-prob | Regression to round score (single-step, since there's no follow-up bid within a round — bidding is a contextual bandit) |
 | Card-play target | Same round score shared by every card played that round | Proper TD bootstrap: `target_t = gamma * max Q(s_{t+1})` for every play except the round's last, which gets the actual round score (a true terminal target — rounds are independent episodes) |
-| Stabilized by | Advantage normalization (std) + entropy bonus | A periodically-synced frozen target network for the bootstrapped card-play targets |
+| Baseline/stabilized by | Learned, state-conditioned critic (`BiddingValueNet`/`CardValueNet`) + advantage std-normalization + entropy bonus | A periodically-synced frozen target network for the bootstrapped card-play targets |
 
 Both share `features.py`'s state encoding, `train.py`'s `OpponentPool`
 self-play mechanism, and the resume/`eval_every` machinery, via `qagent.QAgent`

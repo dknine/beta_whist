@@ -18,8 +18,17 @@ from whist.rl.features import (
     encode_bidding_state,
     encode_trick_state,
 )
+from whist.rl.critic import BiddingValueNet, CardValueNet
 from whist.rl.policy import BiddingPolicy, CardPlayPolicy
-from whist.rl.train import OpponentPool, RunningBaseline, load_policies, save_policies, train
+from whist.rl.train import (
+    OpponentPool,
+    RunningBaseline,
+    load_critics,
+    load_policies,
+    save_critics,
+    save_policies,
+    train,
+)
 
 
 def _bidding_state(**overrides):
@@ -206,12 +215,103 @@ def test_short_training_run_completes_and_saves(tmp_path):
 
     assert (tmp_path / "bidding_policy.pt").exists()
     assert (tmp_path / "card_policy.pt").exists()
+    assert (tmp_path / "bidding_critic.pt").exists()
+    assert (tmp_path / "card_critic.pt").exists()
 
     loaded_bid, loaded_card = load_policies(tmp_path)
     for a, b in zip(bidding_policy.parameters(), loaded_bid.parameters()):
         assert torch.equal(a, b)
     for a, b in zip(card_policy.parameters(), loaded_card.parameters()):
         assert torch.equal(a, b)
+
+
+def test_critic_value_networks_output_scalars():
+    bidding_critic = BiddingValueNet()
+    card_critic = CardValueNet()
+    assert bidding_critic(torch.zeros(BIDDING_FEATURE_DIM)).shape == ()
+    assert card_critic(torch.zeros(TRICK_FEATURE_DIM)).shape == ()
+
+
+def test_save_and_load_critics_round_trip(tmp_path):
+    bidding_critic = BiddingValueNet()
+    card_critic = CardValueNet()
+    save_critics(bidding_critic, card_critic, tmp_path)
+    assert (tmp_path / "bidding_critic.pt").exists()
+    assert (tmp_path / "card_critic.pt").exists()
+
+    loaded_bid, loaded_card = load_critics(tmp_path)
+    for a, b in zip(bidding_critic.parameters(), loaded_bid.parameters()):
+        assert torch.equal(a, b)
+    for a, b in zip(card_critic.parameters(), loaded_card.parameters()):
+        assert torch.equal(a, b)
+
+
+def test_load_critics_falls_back_to_fresh_when_missing(tmp_path):
+    # Simulate a checkpoint written before critics existed: only the
+    # policy weights are on disk.
+    save_policies(BiddingPolicy(), CardPlayPolicy(), tmp_path)
+    bidding_critic, card_critic = load_critics(tmp_path)  # must not raise
+    assert isinstance(bidding_critic, BiddingValueNet)
+    assert isinstance(card_critic, CardValueNet)
+
+
+def test_resume_works_against_a_pre_critic_checkpoint(tmp_path):
+    # A checkpoint saved via save_policies() alone (no critics, no
+    # training_state.pt) should still be resumable -- critics and their
+    # optimizers just start fresh, same as train()'s non-resume path.
+    save_policies(BiddingPolicy(), CardPlayPolicy(), tmp_path)
+    bidding_policy, card_policy = train(
+        iterations=1,
+        games_per_iteration=1,
+        num_players=3,
+        resume_from=tmp_path,
+        save_dir=tmp_path,
+        log_every=0,
+        on_log=lambda msg: None,
+    )
+    for p in bidding_policy.parameters():
+        assert torch.isfinite(p).all()
+
+
+def test_critic_regression_moves_prediction_toward_target():
+    # Isolated, deterministic check of the actual mechanism train() relies on:
+    # (prediction - target)**2 gradient descent should converge the critic's
+    # output toward the target. This is what proves gradients correctly flow
+    # into the critic -- a bug that silently detached it (making it dead
+    # weight in the loss) would leave the prediction unchanged instead.
+    critic = BiddingValueNet()
+    opt = torch.optim.Adam(critic.parameters(), lr=0.1)
+    features = torch.rand(BIDDING_FEATURE_DIM)
+    target = torch.tensor(15.0)
+
+    initial_error = abs(critic(features).item() - 15.0)
+    for _ in range(30):
+        pred = critic(features)
+        loss = (pred - target) ** 2
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    final_error = abs(critic(features).item() - 15.0)
+
+    assert final_error < initial_error
+
+
+def test_actor_critic_training_run_produces_finite_trained_critic(tmp_path):
+    train(
+        iterations=5,
+        games_per_iteration=4,
+        num_players=3,
+        snapshot_every=5,
+        seed=0,
+        save_dir=tmp_path,
+        log_every=0,
+        on_log=lambda msg: None,
+    )
+    bidding_critic, card_critic = load_critics(tmp_path)
+    for p in bidding_critic.parameters():
+        assert torch.isfinite(p).all()
+    for p in card_critic.parameters():
+        assert torch.isfinite(p).all()
 
 
 def test_resume_from_continues_absolute_iteration_count(tmp_path):

@@ -3,8 +3,9 @@
 Two modes:
 - training=True: samples stochastically from the (masked) policy
   distribution and records each decision's log-prob/entropy (with the
-  autograd graph attached) into a per-round buffer for the training loop to
-  turn into a REINFORCE loss.
+  autograd graph attached) plus its input features into a per-round buffer
+  for the training loop to turn into a REINFORCE loss (the features let the
+  training loop query a learned value baseline -- see train.py's critic).
 - training=False: no recording, no grad. Samples stochastically by default
   (useful as a training opponent for diversity) or greedily if
   `deterministic=True` (useful for evaluating a trained policy's best play).
@@ -38,6 +39,7 @@ class TrajectoryStep:
     kind: str  # "bid" or "card"
     log_prob: torch.Tensor  # scalar tensor, still attached to the autograd graph
     entropy: torch.Tensor  # scalar tensor
+    features: torch.Tensor  # detached; used by the training loop to query a learned value baseline
 
 
 class RLPlayer(Player):
@@ -83,7 +85,9 @@ class RLPlayer(Player):
             dist = masked_categorical(logits, mask)
             action = dist.sample()
             self._round_steps.append(
-                TrajectoryStep(kind="bid", log_prob=dist.log_prob(action), entropy=dist.entropy())
+                TrajectoryStep(
+                    kind="bid", log_prob=dist.log_prob(action), entropy=dist.entropy(), features=features
+                )
             )
         else:
             with torch.no_grad():
@@ -104,7 +108,9 @@ class RLPlayer(Player):
             dist = masked_categorical(logits, mask)
             action = dist.sample()
             self._round_steps.append(
-                TrajectoryStep(kind="card", log_prob=dist.log_prob(action), entropy=dist.entropy())
+                TrajectoryStep(
+                    kind="card", log_prob=dist.log_prob(action), entropy=dist.entropy(), features=features
+                )
             )
         else:
             with torch.no_grad():
