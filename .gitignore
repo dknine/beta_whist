@@ -1,6 +1,6 @@
 # whist.rl training output (checkpoints, logs) -- generated, not source
 /models*/
-*_log.txt
+*_log*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
