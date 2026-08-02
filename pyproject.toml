@@ -17,6 +17,8 @@ rl = ["torch>=2.0"]
 whist-play = "whist.cli:main"
 whist-train = "whist.rl.train:main"
 whist-evaluate = "whist.rl.evaluate:main"
+whist-qtrain = "whist.rl.qtrain:main"
+whist-compare = "whist.rl.compare:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

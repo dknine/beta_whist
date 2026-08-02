@@ -1,21 +1,41 @@
 """Reinforcement-learning framework for training Contract Whist bots.
 
+Two algorithms, sharing the same feature encoding (features.py) and
+opponent-pool self-play scaffold (train.py's OpponentPool), for a fair
+comparison:
+
+- REINFORCE (policy gradient): `policy`, `agent.RLPlayer`, `train`.
+- Q-learning (value-based, off-policy): `qnetwork`, `qagent.QAgent`, `qtrain`.
+
+Plus:
 - `features`: state -> fixed-size tensor encoding, plus legal-action masks.
-- `policy`: PyTorch policy networks for bidding and card play.
-- `agent.RLPlayer`: a Player driven by those policies (training or frozen).
-- `train`: self-play REINFORCE training loop with a past-version opponent pool.
-- `evaluate`: benchmark a trained policy against the heuristic bots.
+- `evaluate`: benchmark one trained agent against the heuristic bots.
+- `compare`: head-to-head comparison of an arbitrary mix of heuristic bots
+  and trained REINFORCE/Q-learning agents in the same games.
 """
 
 from .agent import RLPlayer
+from .compare import compare
 from .policy import BiddingPolicy, CardPlayPolicy
-from .train import load_policies, save_policies, train
+from .qagent import QAgent
+from .qnetwork import BiddingQNetwork, CardQNetwork
+from .qtrain import load_qnetworks, save_qnetworks
+from .qtrain import train as train_qlearning
+from .train import load_policies, save_policies
+from .train import train as train_reinforce
 
 __all__ = [
     "RLPlayer",
     "BiddingPolicy",
     "CardPlayPolicy",
-    "train",
+    "train_reinforce",
     "save_policies",
     "load_policies",
+    "QAgent",
+    "BiddingQNetwork",
+    "CardQNetwork",
+    "train_qlearning",
+    "save_qnetworks",
+    "load_qnetworks",
+    "compare",
 ]

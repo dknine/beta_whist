@@ -185,6 +185,56 @@ extend it: trump selection isn't learned, the baseline is a simple
 per-hand-size EMA rather than a learned value function (no actor-critic),
 and there's no opponent-modeling of what other players might hold.
 
+### Q-learning agent (for comparison)
+
+`whist.rl.qtrain` trains a second, algorithmically different bot on the same
+game, feature encoding, and self-play scaffold, so the two are a fair,
+apples-to-apples comparison rather than differing in ten confounded ways at
+once:
+
+|  | REINFORCE (`train.py`) | Q-learning (`qtrain.py`) |
+|---|---|---|
+| Kind | Policy-gradient, on-policy | Value-based, off-policy |
+| Action selection | Sample from learned distribution | Epsilon-greedy over Q-values |
+| Bidding target | Advantage-weighted log-prob | Regression to round score (single-step, since there's no follow-up bid within a round — bidding is a contextual bandit) |
+| Card-play target | Same round score shared by every card played that round | Proper TD bootstrap: `target_t = gamma * max Q(s_{t+1})` for every play except the round's last, which gets the actual round score (a true terminal target — rounds are independent episodes) |
+| Stabilized by | Advantage normalization (std) + entropy bonus | A periodically-synced frozen target network for the bootstrapped card-play targets |
+
+Both share `features.py`'s state encoding, `train.py`'s `OpponentPool`
+self-play mechanism, and the resume/`eval_every` machinery, via `qagent.QAgent`
+(the Q-learning analog of `RLPlayer`) and `qnetwork.BiddingQNetwork`/`CardQNetwork`
+(same I/O shapes as the policy nets, but output raw Q-values, no softmax).
+
+```powershell
+python -m whist.rl.qtrain --iterations 1000 --games-per-iteration 10 --save-dir models_qlearning --eval-every 100 --eval-games 30
+```
+
+Q-learning-specific flags: `--epsilon-start`/`--epsilon-end` (exploration
+rate, linearly decayed over each `train()` call's own `--iterations` —
+note this decay resets on `--resume-from`, it doesn't continue a single
+schedule across sessions), `--opponent-epsilon` (exploration rate for
+frozen opponent-pool seats), `--gamma` (discount for the TD bootstrap,
+default 1.0 — rounds are short enough that discounting isn't really
+necessary), `--target-sync-every` (how often the frozen target network used
+for TD targets gets refreshed from the live card network). `--resume-from`,
+`--eval-every`, `--device`, etc. all work the same as `whist.rl.train`.
+
+### Comparing agents head-to-head
+
+`whist.rl.compare` plays an arbitrary mix of heuristic bots and trained
+agents in the same games — unlike `evaluate.py` (always one RL agent vs N
+copies of one heuristic), this is how you actually pit REINFORCE against
+Q-learning against each other:
+
+```powershell
+python -m whist.rl.compare --seats reinforce:models qlearning:models_qlearning simple simple --num-games 200
+```
+
+Each `--seats` entry is `simple`, `random`, `reinforce:<checkpoint-dir>`, or
+`qlearning:<checkpoint-dir>` (3-7 entries); trained agents play
+deterministically/greedily (no exploration). Reports average score and
+average finishing rank per seat.
+
 ## Tests
 
 ```powershell
