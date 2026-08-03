@@ -49,9 +49,24 @@ PyTorch — see below.)
 python -m whist.cli
 ```
 
-You'll be asked how many players (3-7) and whether each is human or a bot.
-Human players enter bids and cards (e.g. `AS` for Ace of Spades) via the
-terminal.
+You'll be asked how many players (3-7) and, for each seat, whether it's
+`human`, `bot` (`SimpleBot` heuristic), `reinforce`, or `qlearning` — the
+latter two load a trained agent from `whist.rl` (see below) and play it
+greedily/deterministically, no exploration. Human players enter bids and
+cards (e.g. `AS` for Ace of Spades) via the terminal.
+
+`reinforce`/`qlearning` checkpoints default to `models_reinforce_actorcritic`/
+`models_qlearning` (train them first — see the RL sections below); override
+with `--reinforce-dir`/`--qlearning-dir`/`--device` if you keep checkpoints
+elsewhere:
+
+```powershell
+python -m whist.cli --reinforce-dir my_models --qlearning-dir my_qmodels
+```
+
+If a checkpoint can't be loaded (missing directory, or PyTorch not
+installed), you'll get an explanatory message and be asked to pick again for
+that seat rather than crashing.
 
 ## Use as a library
 
