@@ -68,6 +68,20 @@ If a checkpoint can't be loaded (missing directory, or PyTorch not
 installed), you'll get an explanatory message and be asked to pick again for
 that seat rather than crashing.
 
+## Play with a GUI
+
+```powershell
+python -m whist.gui
+```
+
+A Tkinter desktop GUI (`src/whist/gui.py`) for the same game: pick 3-7 seats,
+each `human`/`Simple Bot`/`Random Bot`/`REINFORCE Bot`/`Q-Learning Bot`, then
+play with mouse clicks -- your hand, legal bids, and legal card plays are
+shown as buttons, with a live scoreboard and event log. The game engine runs
+unmodified in a background thread; bots play at a small fixed pace so the
+table is watchable. Only one human seat is supported (or zero, to spectate
+bots/RL agents playing each other).
+
 ## Use as a library
 
 ```python

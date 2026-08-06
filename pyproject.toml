@@ -15,6 +15,7 @@ rl = ["torch>=2.0"]
 
 [project.scripts]
 whist-play = "whist.cli:main"
+whist-gui = "whist.gui:main"
 whist-train = "whist.rl.train:main"
 whist-evaluate = "whist.rl.evaluate:main"
 whist-qtrain = "whist.rl.qtrain:main"
